@@ -24,6 +24,7 @@
 namespace OCA\Files_Sharing\Tests;
 
 use OCA\Files_Sharing\ExpireSharesJob;
+use OCP\Share\IManager;
 
 /**
  * Class ExpireSharesJobTest
@@ -38,6 +39,11 @@ class ExpireSharesJobTest extends \Test\TestCase {
 	 * @var ExpireSharesJob
 	 */
 	private $job;
+
+	/**
+	 * @var IManager
+	 */
+	private $shareManager;
 
 	/**
 	 * @var \OCP\IDBConnection
@@ -57,6 +63,8 @@ class ExpireSharesJobTest extends \Test\TestCase {
 	protected function setUp(): void {
 		parent::setUp();
 
+		$this->shareManager =  \OC::$server->getShareManager();
+
 		$this->connection = \OC::$server->getDatabaseConnection();
 		// clear occasional leftover shares from other tests
 		$this->connection->executeUpdate('DELETE FROM `*PREFIX*share`');
@@ -70,7 +78,7 @@ class ExpireSharesJobTest extends \Test\TestCase {
 
 		\OC::registerShareHooks();
 
-		$this->job = new ExpireSharesJob();
+		$this->job = new ExpireSharesJob($this->shareManager, $this->connection);
 	}
 
 	protected function tearDown(): void {
@@ -106,7 +114,7 @@ class ExpireSharesJobTest extends \Test\TestCase {
 		return $shares;
 	}
 
-	public function dataExpireLinkShare() {
+	public function dataExpireShare() {
 		return [
 			[false,   '', false, false],
 			[false,   '',  true, false],
@@ -122,31 +130,44 @@ class ExpireSharesJobTest extends \Test\TestCase {
 	}
 
 	/**
-	 * @dataProvider dataExpireLinkShare
+	 * @dataProvider dataExpireShare
 	 *
 	 * @param bool addExpiration Should we add an expire date
 	 * @param string $interval The dateInterval
 	 * @param bool $addInterval If true add to the current time if false subtract
-	 * @param bool $shouldExpire Should this share be expired
+	 * @param bool $shouldExpire Should expiration added shares be expired
 	 */
-	public function testExpireLinkShare($addExpiration, $interval, $addInterval, $shouldExpire) {
+	public function testExpireShare($addExpiration, $interval, $addInterval, $shouldExpire) {
 		$this->loginAsUser($this->user1);
 
 		$userFolder = \OC::$server->getUserFolder($this->user1);
 		$sharedFolder = $userFolder->newFolder('test');
 
 		$shareManager = \OC::$server->getShareManager();
-		$share = $shareManager->newShare();
-		$share->setSharedBy($this->user1);
-		$share->setShareType(\OCP\Share::SHARE_TYPE_LINK);
-		$share->setNode($sharedFolder);
-		$share->setPermissions(\OCP\Constants::PERMISSION_READ);
-		$shareManager->createShare($share);
+		$linkShare = $shareManager->newShare();
+		$linkShare->setSharedBy($this->user1);
+		$linkShare->setShareType(\OCP\Share::SHARE_TYPE_LINK);
+		$linkShare->setNode($sharedFolder);
+		$linkShare->setPermissions(\OCP\Constants::PERMISSION_READ);
+		$linkShare = $shareManager->createShare($linkShare);
+
+		$userShare = $shareManager->newShare();
+		$userShare->setSharedBy($this->user1);
+		$userShare->setSharedWith($this->user2);
+		$userShare->setShareType(\OCP\Share::SHARE_TYPE_USER);
+		$userShare->setNode($sharedFolder);
+		$userShare->setPermissions(\OCP\Constants::PERMISSION_READ);
+		$userShare = $shareManager->createShare($userShare);
+
+		$shareWithoutExpiration = $shareManager->newShare();
+		$shareWithoutExpiration->setSharedBy($this->user1);
+		$shareWithoutExpiration->setShareType(\OCP\Share::SHARE_TYPE_LINK);
+		$shareWithoutExpiration->setNode($sharedFolder);
+		$shareWithoutExpiration->setPermissions(\OCP\Constants::PERMISSION_READ);
+		$shareManager->createShare($shareWithoutExpiration);
 
 		$shares = $this->getShares();
-		$this->assertCount(1, $shares);
-		\reset($shares);
-		$share = \current($shares);
+		$this->assertCount(3, $shares);
 
 		if ($addExpiration) {
 			$expire = new \DateTime();
@@ -162,13 +183,12 @@ class ExpireSharesJobTest extends \Test\TestCase {
 			$qb = $this->connection->getQueryBuilder();
 			$qb->update('share')
 				->set('expiration', $qb->createParameter('expiration'))
-				->where($qb->expr()->eq('id', $qb->createParameter('id')))
-				->setParameter('id', $share['id'])
+				->where($qb->expr()->eq('id', $qb->createParameter('link_share_id')))
+				->orWhere($qb->expr()->eq('id', $qb->createParameter('user_share_id')))
+				->setParameter('link_share_id', $linkShare->getId())
+				->setParameter('user_share_id', $userShare->getId())
 				->setParameter('expiration', $expire)
 				->execute();
-
-			$shares = $this->getShares();
-			$this->assertCount(1, $shares);
 		}
 
 		$this->logout();
@@ -178,37 +198,9 @@ class ExpireSharesJobTest extends \Test\TestCase {
 		$shares = $this->getShares();
 
 		if ($shouldExpire) {
-			$this->assertCount(0, $shares);
-		} else {
 			$this->assertCount(1, $shares);
+		} else {
+			$this->assertCount(3, $shares);
 		}
-	}
-
-	public function testDoNotExpireOtherShares() {
-		$this->loginAsUser($this->user1);
-
-		$userFolder = \OC::$server->getUserFolder($this->user1);
-		$sharedFolder = $userFolder->newFolder('test');
-
-		$shareManager = \OC::$server->getShareManager();
-		$share = $shareManager->newShare();
-		$share->setSharedBy($this->user1);
-		$share->setSharedWith($this->user2);
-		$share->setShareType(\OCP\Share::SHARE_TYPE_USER);
-		$share->setNode($sharedFolder);
-		$share->setPermissions(\OCP\Constants::PERMISSION_READ);
-		$shareManager->createShare($share);
-
-		$shares = $this->getShares();
-		$this->assertCount(1, $shares);
-		\reset($shares);
-		$share = \current($shares);
-
-		$this->logout();
-
-		$this->job->run([]);
-
-		$shares = $this->getShares();
-		$this->assertCount(1, $shares);
 	}
 }
